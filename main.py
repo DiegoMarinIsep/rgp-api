@@ -11,14 +11,21 @@ app = FastAPI()
 @app.get("/rgp/list")
 def list_rgp_files(year: int, doy: int):
     """
-    Liste les fichiers RGP disponibles pour une année + day-of-year.
+    Liste TOUS les fichiers présents dans un dossier RGP,
+    peu importe l'extension.
     Exemple : /rgp/list?year=2025&doy=1
     """
     url = f"https://rgpdata.ign.fr/pub/data/{year}/{doy:03d}/"
     html = requests.get(url).text
     soup = BeautifulSoup(html, "html.parser")
 
-    files = [a["href"] for a in soup.find_all("a") if a["href"].endswith(".gz")]
+    # Liste tous les fichiers (toutes extensions)
+    files = [
+        a["href"]
+        for a in soup.find_all("a")
+        if "." in a["href"]  # simple test : contient un point → fichier
+    ]
+
     return {"files": files}
 
 
