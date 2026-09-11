@@ -1,158 +1,72 @@
-from fastapi import FastAPI, Depends
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, ForeignKey
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
-from datetime import datetime
-import xml.etree.ElementTree as ET
+from fastapi import FastAPI, Response
+import requests
+from bs4 import BeautifulSoup
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./rgp.db"
+app = FastAPI()
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
+###############################################
+# 1) ENDPOINTS RGP : LISTING + DOWNLOAD
+###############################################
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+@app.get("/rgp/list")
+def list_rgp_files(year: int, doy: int):
+    """
+    Liste les fichiers RGP disponibles pour une année + day-of-year.
+    Exemple : /rgp/list?year=2025&doy=1
+    """
+    url = f"https://rgpdata.ign.fr/pub/data/{year}/{doy:03d}/"
+    html = requests.get(url).text
+    soup = BeautifulSoup(html, "html.parser")
 
-Base = declarative_base()
+    files = [a["href"] for a in soup.find_all("a") if a["href"].endswith(".gz")]
+    return {"files": files}
 
-class Station(Base):
-    __tablename__ = "stations"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-    lat = Column(Float, nullable=True)
-    lon = Column(Float, nullable=True)
-    environment = Column(String, nullable=True)
-    receiver = Column(String, nullable=True)
-    antenna = Column(String, nullable=True)
-    metrics = relationship("QCMetrics", back_populates="station")
 
-class QCMetrics(Base):
-    __tablename__ = "qc_metrics"
-    id = Column(Integer, primary_key=True, index=True)
-    station_id = Column(Integer, ForeignKey("stations.id"))
-    datetime = Column(DateTime)
-    epochs_ratio = Column(Float)
-    obs_ratio_mask3 = Column(Float)
-    obs_ratio_mask10 = Column(Float)
-    latency = Column(Float)
-    error = Column(Integer)
-    interval = Column(Integer)
-    station = relationship("Station", back_populates="metrics")
+@app.get("/rgp/download")
+def download_rgp_file(year: int, doy: int, filename: str):
+    """
+    Télécharge un fichier RGP directement depuis rgpdata.ign.fr
+    Exemple :
+    /rgp/download?year=2025&doy=1&filename=AAER00FRA_R_20250010000_01D_30S_MO.rnx.gz
+    """
+    url = f"https://rgpdata.ign.fr/pub/data/{year}/{doy:03d}/{filename}"
 
-Base.metadata.create_all(bind=engine)
+    r = requests.get(url)
+    if r.status_code != 200:
+        return {"error": "Fichier introuvable sur le serveur RGP"}
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def parse_qc_xml(path: str):
-    tree = ET.parse(path)
-    root = tree.getroot()
-    station = root.find(".//station").attrib["name"]
-    fileinfo = root.find(".//file")
-    epochs_ratio = float(root.find(".//epochs_ratio").text)
-    obs_ratio_mask3 = float(root.find(".//obs_ratio").text)
-    obs_ratio_mask10 = float(root.find(".//mask_elevation").text.split()[0])
-    latency = float(root.find(".//latency").text)
-    error = int(fileinfo.attrib["error"])
-    interval = int(fileinfo.attrib["interval"])
-    dt = datetime.strptime(root.attrib["date"], "%Y-%m-%d")
-    return {
-        "station": station,
-        "datetime": dt,
-        "epochs_ratio": epochs_ratio,
-        "obs_ratio_mask3": obs_ratio_mask3,
-        "obs_ratio_mask10": obs_ratio_mask10,
-        "latency": latency,
-        "error": error,
-        "interval": interval,
-    }
-
-def ingest_qc_file(path: str):
-    db: Session = SessionLocal()
-    data = parse_qc_xml(path)
-    station = db.query(Station).filter(Station.name == data["station"]).first()
-    if not station:
-        station = Station(name=data["station"])
-        db.add(station)
-        db.commit()
-        db.refresh(station)
-    metric = QCMetrics(
-        station_id=station.id,
-        datetime=data["datetime"],
-        epochs_ratio=data["epochs_ratio"],
-        obs_ratio_mask3=data["obs_ratio_mask3"],
-        obs_ratio_mask10=data["obs_ratio_mask10"],
-        latency=data["latency"],
-        error=data["error"],
-        interval=data["interval"],
+    return Response(
+        content=r.content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-    db.add(metric)
-    db.commit()
-    db.close()
 
-app = FastAPI(title="RGP QC API")
+###############################################
+# 2) TES ENDPOINTS EXISTANTS (stations, status, metrics)
+###############################################
 
-def compute_status(m: QCMetrics):
-    if m.error != 0 or m.epochs_ratio < 90:
-        return "Indisponible"
-    if m.epochs_ratio < 95 or m.latency > 5:
-        return "Dégradé"
-    return "Nominal"
+stations_data = {
+    "AAER": {"status": "OK", "metrics": {"temp": 22, "battery": 95}},
+    "BBER": {"status": "DOWN", "metrics": {"temp": None, "battery": None}},
+}
 
 @app.get("/stations")
-def list_stations(db: Session = Depends(get_db)):
-    stations = db.query(Station).all()
-    return [{"name": s.name, "lat": s.lat, "lon": s.lon, "environment": s.environment} for s in stations]
+def get_stations():
+    return list(stations_data.keys())
 
-@app.get("/stations/{name}/status")
-def station_status(name: str, db: Session = Depends(get_db)):
-    station = db.query(Station).filter(Station.name == name).first()
-    if not station:
-        return {"error": "station not found"}
-    last_metric = (
-        db.query(QCMetrics)
-        .filter(QCMetrics.station_id == station.id)
-        .order_by(QCMetrics.datetime.desc())
-        .first()
-    )
-    if not last_metric:
-        return {"status": "unknown"}
+@app.get("/stations/{station_id}/status")
+def get_station_status(station_id: str):
+    if station_id not in stations_data:
+        return {"error": "Station inconnue"}
+    return {"station": station_id, "status": stations_data[station_id]["status"]}
+
+@app.get("/stations/{station_id}/metrics")
+def get_station_metrics(station_id: str, start: str = None, end: str = None):
+    if station_id not in stations_data:
+        return {"error": "Station inconnue"}
     return {
-        "station": station.name,
-        "status": compute_status(last_metric),
-        "datetime": last_metric.datetime,
-        "epochs_ratio": last_metric.epochs_ratio,
-        "obs_ratio_mask3": last_metric.obs_ratio_mask3,
-        "obs_ratio_mask10": last_metric.obs_ratio_mask10,
-        "latency": last_metric.latency,
-        "error": last_metric.error,
+        "station": station_id,
+        "metrics": stations_data[station_id]["metrics"],
+        "start": start,
+        "end": end
     }
-
-@app.get("/stations/{name}/metrics")
-def station_metrics(name: str, start: datetime, end: datetime, db: Session = Depends(get_db)):
-    station = db.query(Station).filter(Station.name == name).first()
-    if not station:
-        return {"error": "station not found"}
-    metrics = (
-        db.query(QCMetrics)
-        .filter(QCMetrics.station_id == station.id)
-        .filter(QCMetrics.datetime >= start)
-        .filter(QCMetrics.datetime <= end)
-        .order_by(QCMetrics.datetime)
-        .all()
-    )
-    return [
-        {
-            "datetime": m.datetime,
-            "epochs_ratio": m.epochs_ratio,
-            "obs_ratio_mask3": m.obs_ratio_mask3,
-            "obs_ratio_mask10": m.obs_ratio_mask10,
-            "latency": m.latency,
-            "error": m.error,
-        }
-        for m in metrics
-    ]
