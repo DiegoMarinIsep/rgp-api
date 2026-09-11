@@ -5,12 +5,21 @@ import requests
 from bs4 import BeautifulSoup
 import psycopg2
 
+# Module externe contenant le parsing avancé
 from rinex_parser import parse_rinex_file
 
 app = FastAPI()
 
 ###############################################
-# 0) CONNEXION POSTGRESQL (Render)
+# 0) ROUTE ROOT POUR RENDER (OBLIGATOIRE)
+###############################################
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "RGP API is running"}
+
+###############################################
+# 1) CONNEXION POSTGRESQL (Render)
 ###############################################
 
 def get_db_conn():
@@ -60,7 +69,7 @@ def init_db():
 init_db()
 
 ###############################################
-# 1) LISTE TOUS LES FICHIERS RGP
+# 2) LISTE TOUS LES FICHIERS RGP
 ###############################################
 
 @app.get("/rgp/list")
@@ -73,7 +82,7 @@ def list_rgp_files(year: int, doy: int):
     return {"files": files}
 
 ###############################################
-# 2) TÉLÉCHARGER UN FICHIER RGP + STOCKER EN DB
+# 3) TÉLÉCHARGER UN FICHIER RGP + STOCKER EN DB
 ###############################################
 
 def save_file_to_disk(year, doy, filename, content):
@@ -115,7 +124,7 @@ def download_rgp_file(year: int, doy: int, filename: str):
     )
 
 ###############################################
-# 3) MÉTRIQUES GNSS VIA PARSING RINEX AVANCÉ
+# 4) MÉTRIQUES GNSS VIA PARSING RINEX AVANCÉ
 ###############################################
 
 @app.get("/rgp/metrics")
@@ -164,7 +173,7 @@ def rgp_metrics(year: int, doy: int, filename: str):
     }
 
 ###############################################
-# 4) ENDPOINT CRON AUTOMATIQUE
+# 5) ENDPOINT CRON AUTOMATIQUE
 ###############################################
 
 @app.post("/rgp/cron/daily")
@@ -187,7 +196,7 @@ def rgp_cron_daily(year: int, doy: int):
     }
 
 ###############################################
-# 5) TES ENDPOINTS STATIONS
+# 6) ENDPOINTS STATIONS
 ###############################################
 
 stations_data = {
