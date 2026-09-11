@@ -5,7 +5,6 @@ import requests
 from bs4 import BeautifulSoup
 import psycopg2
 
-# Module externe contenant le parsing avancé
 from rinex_parser import parse_rinex_file
 
 app = FastAPI()
